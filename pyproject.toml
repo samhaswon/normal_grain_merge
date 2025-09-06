@@ -1,0 +1,16 @@
+[build-system]
+requires = [
+    "setuptools>=64",
+    "wheel",
+    "numpy==1.26.4"  # pin or loosen depending on your needs
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ngm"
+version = "0.0.1"
+description = "Normal grain merge C extension"
+authors = [
+    { name = "Samuel Howard" }
+]
+dependencies = ["numpy==1.26.4"]

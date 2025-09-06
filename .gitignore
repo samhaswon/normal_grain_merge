@@ -1,0 +1,7 @@
+.idea/
+.vscode/
+.venv/
+build/
+*.pyd
+ngm.egg-info/
+__pycache__*
