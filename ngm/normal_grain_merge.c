@@ -4,6 +4,7 @@
 #include <float.h>
 #include <Python.h>
 #include <numpy/arrayobject.h>
+#include <smmintrin.h>
 #include <immintrin.h>  /* AVX2 + SSE4.2 */
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -284,20 +285,28 @@ static void kernel_scalar_rgba(const uint8_t *base, const uint8_t *texture,
    You can later replace gathers with better deinterleaving if needed.
 */
 
-static inline __m256 gather_u8_to_f32_avx2(const uint8_t *base_ptr, int stride, npy_intp start_idx) {
-    /* indices: start_idx .. start_idx+7, each multiplied by stride */
-    const int idx0 = (int)((start_idx + 0) * stride);
-    const int idx1 = (int)((start_idx + 1) * stride);
-    const int idx2 = (int)((start_idx + 2) * stride);
-    const int idx3 = (int)((start_idx + 3) * stride);
-    const int idx4 = (int)((start_idx + 4) * stride);
-    const int idx5 = (int)((start_idx + 5) * stride);
-    const int idx6 = (int)((start_idx + 6) * stride);
-    const int idx7 = (int)((start_idx + 7) * stride);
+/* Convert 8 u8 interleaved channel samples (stride 3 or 4) to float32 in [0,1] via gather. */
+static inline __m256 gather_u8_to_unit_f32_avx2(const uint8_t *base_ptr, int stride,
+                                                npy_intp start_idx) {
+    const int i0 = (int)((start_idx + 0) * stride);
+    const int i1 = (int)((start_idx + 1) * stride);
+    const int i2 = (int)((start_idx + 2) * stride);
+    const int i3 = (int)((start_idx + 3) * stride);
+    const int i4 = (int)((start_idx + 4) * stride);
+    const int i5 = (int)((start_idx + 5) * stride);
+    const int i6 = (int)((start_idx + 6) * stride);
+    const int i7 = (int)((start_idx + 7) * stride);
 
-    __m256i offs = _mm256_setr_epi32(idx0, idx1, idx2, idx3, idx4, idx5, idx6, idx7);
-    __m256i v32  = _mm256_i32gather_epi32((const int*)base_ptr, offs, 1); /* gather 8 x u8, read as u32 */
+    __m256i offs = _mm256_setr_epi32(i0, i1, i2, i3, i4, i5, i6, i7);
+    __m256i v32  = _mm256_i32gather_epi32((const int*)base_ptr, offs, 1); /* read 8 x u8 as u32 */
     v32 = _mm256_and_si256(v32, _mm256_set1_epi32(0xFF));
+    return _mm256_mul_ps(_mm256_cvtepi32_ps(v32), _mm256_set1_ps(1.0f/255.0f));
+}
+
+/* Convert 8 consecutive u8 to float32 in [0,1] (for grayscale im_alpha). */
+static inline __m256 load8_u8_to_unit_f32_avx2(const uint8_t *p) {
+    __m128i v8  = _mm_loadl_epi64((const __m128i*)p);        /* 8 bytes -> XMM */
+    __m256i v32 = _mm256_cvtepu8_epi32(v8);                  /* widen to 8 x u32 */
     return _mm256_mul_ps(_mm256_cvtepi32_ps(v32), _mm256_set1_ps(1.0f/255.0f));
 }
 
@@ -305,13 +314,19 @@ static inline __m256 clamp01_ps(__m256 x) {
     return _mm256_min_ps(_mm256_max_ps(x, _mm256_set1_ps(0.0f)), _mm256_set1_ps(1.0f));
 }
 
-static inline void store_f32_to_u8_3x_avx2(__m256 fr, __m256 fg, __m256 fb,
-                                           uint8_t *out_ptr, npy_intp start_idx) {
-    /* Convert 8-lane float [0,1] back to uint8 and scatter with stride 3 */
+/* Replace NaN with 0.0f (Inf is not expected from uint8-origin math). */
+static inline __m256 nan_to_num_ps(__m256 x) {
+    __m256 cmp = _mm256_cmp_ps(x, x, _CMP_ORD_Q); /* 0 for NaN lanes */
+    return _mm256_blendv_ps(_mm256_set1_ps(0.0f), x, cmp);
+}
+
+/* Truncate [0,1] floats to uint8 and scatter to interleaved RGB output. */
+static inline void store_unit_f32_to_u8_rgb8_avx2(__m256 fr, __m256 fg, __m256 fb,
+                                                  uint8_t *out_ptr, npy_intp start_idx) {
     __m256 scale = _mm256_set1_ps(255.0f);
-    __m256i ir = _mm256_cvtps_epi32(_mm256_mul_ps(fr, scale));
-    __m256i ig = _mm256_cvtps_epi32(_mm256_mul_ps(fg, scale));
-    __m256i ib = _mm256_cvtps_epi32(_mm256_mul_ps(fb, scale));
+    __m256i ir = _mm256_cvttps_epi32(_mm256_mul_ps(fr, scale));
+    __m256i ig = _mm256_cvttps_epi32(_mm256_mul_ps(fg, scale));
+    __m256i ib = _mm256_cvttps_epi32(_mm256_mul_ps(fb, scale));
 
     int r[8], g[8], b[8];
     _mm256_storeu_si256((__m256i*)r, ir);
@@ -319,81 +334,130 @@ static inline void store_f32_to_u8_3x_avx2(__m256 fr, __m256 fg, __m256 fb,
     _mm256_storeu_si256((__m256i*)b, ib);
 
     for (int k = 0; k < 8; ++k) {
-        npy_intp p = start_idx + k;
-        out_ptr[3*p+0] = (uint8_t)((r[k] < 0 ? 0 : r[k] > 255 ? 255 : r[k]));
-        out_ptr[3*p+1] = (uint8_t)((g[k] < 0 ? 0 : g[k] > 255 ? 255 : g[k]));
-        out_ptr[3*p+2] = (uint8_t)((b[k] < 0 ? 0 : b[k] > 255 ? 255 : b[k]));
+        const npy_intp p = start_idx + k;
+        out_ptr[3*p+0] = (uint8_t)(r[k] < 0 ? 0 : r[k] > 255 ? 255 : r[k]);
+        out_ptr[3*p+1] = (uint8_t)(g[k] < 0 ? 0 : g[k] > 255 ? 255 : g[k]);
+        out_ptr[3*p+2] = (uint8_t)(b[k] < 0 ? 0 : b[k] > 255 ? 255 : b[k]);
     }
 }
 
+/* texture is RGB: texture_alpha = im_alpha broadcast, inverse_tpa = 1 - texture_alpha */
 static void kernel_avx2_rgb(const uint8_t *base, const uint8_t *texture,
                             const uint8_t *skin, const uint8_t *im_alpha,
                             uint8_t *out, npy_intp pixels) {
     const int stride3 = 3, stride4 = 4;
+    const __m256 half = _mm256_set1_ps(0.5f);
+    const __m256 one  = _mm256_set1_ps(1.0f);
+    const __m256 w    = _mm256_set1_ps((float)SKIN_WEIGHT);
+    const __m256 invw = _mm256_set1_ps(1.0f - (float)SKIN_WEIGHT);
+
     npy_intp i = 0;
     for (; i + 8 <= pixels; i += 8) {
-        __m256 fb_r = gather_u8_to_f32_avx2(base+0, stride3, i);
-        __m256 fb_g = gather_u8_to_f32_avx2(base+1, stride3, i);
-        __m256 fb_b = gather_u8_to_f32_avx2(base+2, stride3, i);
+        /* base RGB in [0,1] */
+        __m256 fb_r = gather_u8_to_unit_f32_avx2(base+0, stride3, i);
+        __m256 fb_g = gather_u8_to_unit_f32_avx2(base+1, stride3, i);
+        __m256 fb_b = gather_u8_to_unit_f32_avx2(base+2, stride3, i);
 
-        __m256 ft_r = gather_u8_to_f32_avx2(texture+0, stride3, i);
-        __m256 ft_g = gather_u8_to_f32_avx2(texture+1, stride3, i);
-        __m256 ft_b = gather_u8_to_f32_avx2(texture+2, stride3, i);
+        /* texture RGB in [0,1] */
+        __m256 ft_r = gather_u8_to_unit_f32_avx2(texture+0, stride3, i);
+        __m256 ft_g = gather_u8_to_unit_f32_avx2(texture+1, stride3, i);
+        __m256 ft_b = gather_u8_to_unit_f32_avx2(texture+2, stride3, i);
 
-        __m256 fs_r = gather_u8_to_f32_avx2(skin+0, stride4, i);
-        __m256 fs_g = gather_u8_to_f32_avx2(skin+1, stride4, i);
-        __m256 fs_b = gather_u8_to_f32_avx2(skin+2, stride4, i);
-        __m256 fs_a = gather_u8_to_f32_avx2(skin+3, stride4, i);
+        /* skin RGB in [0,1] */
+        __m256 fs_r = gather_u8_to_unit_f32_avx2(skin+0, stride4, i);
+        __m256 fs_g = gather_u8_to_unit_f32_avx2(skin+1, stride4, i);
+        __m256 fs_b = gather_u8_to_unit_f32_avx2(skin+2, stride4, i);
 
-        /* im_alpha scalar path for now */
-        float a_im_s[8];
-        for (int k = 0; k < 8; ++k) a_im_s[k] = im_alpha[i+k] * (1.0f/255.0f);
-        __m256 fa_im = _mm256_loadu_ps(a_im_s);
+        /* texture_alpha = im_alpha */
+        __m256 fa_im = load8_u8_to_unit_f32_avx2(im_alpha + i);
+        __m256 fit_a = _mm256_sub_ps(one, fa_im);
 
-        /* Placeholder math: out = base */
-        __m256 fr = fb_r, fg = fb_g, fbv = fb_b;
+        /* gm_out = clip(texture + skin - 0.5) */
+        __m256 gm_r = clamp01_ps(_mm256_sub_ps(_mm256_add_ps(ft_r, fs_r), half));
+        __m256 gm_g = clamp01_ps(_mm256_sub_ps(_mm256_add_ps(ft_g, fs_g), half));
+        __m256 gm_b = clamp01_ps(_mm256_sub_ps(_mm256_add_ps(ft_b, fs_b), half));
 
-        fr = clamp01_ps(fr); fg = clamp01_ps(fg); fbv = clamp01_ps(fbv);
-        store_f32_to_u8_3x_avx2(fr, fg, fbv, out, i);
+        /* gm_out = gm_out * texture_alpha + texture * inverse_tpa */
+        gm_r = _mm256_add_ps(_mm256_mul_ps(gm_r, fa_im), _mm256_mul_ps(ft_r, fit_a));
+        gm_g = _mm256_add_ps(_mm256_mul_ps(gm_g, fa_im), _mm256_mul_ps(ft_g, fit_a));
+        gm_b = _mm256_add_ps(_mm256_mul_ps(gm_b, fa_im), _mm256_mul_ps(ft_b, fit_a));
+
+        /* gm_out = gm_out * (1 - w) + skin * w */
+        gm_r = _mm256_add_ps(_mm256_mul_ps(gm_r, invw), _mm256_mul_ps(fs_r, w));
+        gm_g = _mm256_add_ps(_mm256_mul_ps(gm_g, invw), _mm256_mul_ps(fs_g, w));
+        gm_b = _mm256_add_ps(_mm256_mul_ps(gm_b, invw), _mm256_mul_ps(fs_b, w));
+
+        /* nan_to_num */
+        gm_r = nan_to_num_ps(gm_r);
+        gm_g = nan_to_num_ps(gm_g);
+        gm_b = nan_to_num_ps(gm_b);
+
+        /* n_out = gm_out * texture_alpha + base * inverse_tpa */
+        __m256 fr = _mm256_add_ps(_mm256_mul_ps(gm_r, fa_im), _mm256_mul_ps(fb_r, fit_a));
+        __m256 fg = _mm256_add_ps(_mm256_mul_ps(gm_g, fa_im), _mm256_mul_ps(fb_g, fit_a));
+        __m256 fb = _mm256_add_ps(_mm256_mul_ps(gm_b, fa_im), _mm256_mul_ps(fb_b, fit_a));
+
+        store_unit_f32_to_u8_rgb8_avx2(fr, fg, fb, out, i);
     }
 
-    /* Tail */
     if (i < pixels) {
         kernel_scalar_rgb(base + 3*i, texture + 3*i, skin + 4*i, im_alpha + i,
                           out + 3*i, pixels - i);
     }
 }
 
+/* texture is RGBA: texture_alpha = texture.A * im_alpha, inverse_tpa = 1 - texture_alpha */
 static void kernel_avx2_rgba(const uint8_t *base, const uint8_t *texture,
                              const uint8_t *skin, const uint8_t *im_alpha,
                              uint8_t *out, npy_intp pixels) {
     const int stride3 = 3, stride4 = 4;
+    const __m256 half = _mm256_set1_ps(0.5f);
+    const __m256 one  = _mm256_set1_ps(1.0f);
+    const __m256 w    = _mm256_set1_ps((float)SKIN_WEIGHT);
+    const __m256 invw = _mm256_set1_ps(1.0f - (float)SKIN_WEIGHT);
+
     npy_intp i = 0;
     for (; i + 8 <= pixels; i += 8) {
-        __m256 fb_r = gather_u8_to_f32_avx2(base+0, stride3, i);
-        __m256 fb_g = gather_u8_to_f32_avx2(base+1, stride3, i);
-        __m256 fb_b = gather_u8_to_f32_avx2(base+2, stride3, i);
+        __m256 fb_r = gather_u8_to_unit_f32_avx2(base+0, stride3, i);
+        __m256 fb_g = gather_u8_to_unit_f32_avx2(base+1, stride3, i);
+        __m256 fb_b = gather_u8_to_unit_f32_avx2(base+2, stride3, i);
 
-        __m256 ft_r = gather_u8_to_f32_avx2(texture+0, stride4, i);
-        __m256 ft_g = gather_u8_to_f32_avx2(texture+1, stride4, i);
-        __m256 ft_b = gather_u8_to_f32_avx2(texture+2, stride4, i);
-        __m256 ft_a = gather_u8_to_f32_avx2(texture+3, stride4, i);
+        __m256 ft_r = gather_u8_to_unit_f32_avx2(texture+0, stride4, i);
+        __m256 ft_g = gather_u8_to_unit_f32_avx2(texture+1, stride4, i);
+        __m256 ft_b = gather_u8_to_unit_f32_avx2(texture+2, stride4, i);
+        __m256 ft_a = gather_u8_to_unit_f32_avx2(texture+3, stride4, i);  /* texture alpha */
 
-        __m256 fs_r = gather_u8_to_f32_avx2(skin+0, stride4, i);
-        __m256 fs_g = gather_u8_to_f32_avx2(skin+1, stride4, i);
-        __m256 fs_b = gather_u8_to_f32_avx2(skin+2, stride4, i);
-        __m256 fs_a = gather_u8_to_f32_avx2(skin+3, stride4, i);
+        __m256 fs_r = gather_u8_to_unit_f32_avx2(skin+0, stride4, i);
+        __m256 fs_g = gather_u8_to_unit_f32_avx2(skin+1, stride4, i);
+        __m256 fs_b = gather_u8_to_unit_f32_avx2(skin+2, stride4, i);
 
-        float a_im_s[8];
-        for (int k = 0; k < 8; ++k) a_im_s[k] = im_alpha[i+k] * (1.0f/255.0f);
-        __m256 fa_im = _mm256_loadu_ps(a_im_s);
+        __m256 fa_im = load8_u8_to_unit_f32_avx2(im_alpha + i);
+        __m256 fta   = _mm256_mul_ps(ft_a, fa_im);           /* texture_alpha */
+        __m256 fit_a = _mm256_sub_ps(one, fta);               /* inverse_tpa  */
 
-        /* Placeholder math: out = base */
-        __m256 fr = fb_r, fg = fb_g, fbv = fb_b;
+        __m256 gm_r = clamp01_ps(_mm256_sub_ps(_mm256_add_ps(ft_r, fs_r), half));
+        __m256 gm_g = clamp01_ps(_mm256_sub_ps(_mm256_add_ps(ft_g, fs_g), half));
+        __m256 gm_b = clamp01_ps(_mm256_sub_ps(_mm256_add_ps(ft_b, fs_b), half));
 
-        fr = clamp01_ps(fr); fg = clamp01_ps(fg); fbv = clamp01_ps(fbv);
-        store_f32_to_u8_3x_avx2(fr, fg, fbv, out, i);
+        gm_r = _mm256_add_ps(_mm256_mul_ps(gm_r, fta), _mm256_mul_ps(ft_r, fit_a));
+        gm_g = _mm256_add_ps(_mm256_mul_ps(gm_g, fta), _mm256_mul_ps(ft_g, fit_a));
+        gm_b = _mm256_add_ps(_mm256_mul_ps(gm_b, fta), _mm256_mul_ps(ft_b, fit_a));
+
+        gm_r = _mm256_add_ps(_mm256_mul_ps(gm_r, invw), _mm256_mul_ps(fs_r, w));
+        gm_g = _mm256_add_ps(_mm256_mul_ps(gm_g, invw), _mm256_mul_ps(fs_g, w));
+        gm_b = _mm256_add_ps(_mm256_mul_ps(gm_b, invw), _mm256_mul_ps(fs_b, w));
+
+        gm_r = nan_to_num_ps(gm_r);
+        gm_g = nan_to_num_ps(gm_g);
+        gm_b = nan_to_num_ps(gm_b);
+
+        __m256 fr = _mm256_add_ps(_mm256_mul_ps(gm_r, fta), _mm256_mul_ps(fb_r, fit_a));
+        __m256 fg = _mm256_add_ps(_mm256_mul_ps(gm_g, fta), _mm256_mul_ps(fb_g, fit_a));
+        __m256 fb = _mm256_add_ps(_mm256_mul_ps(gm_b, fta), _mm256_mul_ps(fb_b, fit_a));
+
+        store_unit_f32_to_u8_rgb8_avx2(fr, fg, fb, out, i);
     }
+
     if (i < pixels) {
         kernel_scalar_rgba(base + 3*i, texture + 4*i, skin + 4*i, im_alpha + i,
                            out + 3*i, pixels - i);
@@ -402,60 +466,99 @@ static void kernel_avx2_rgba(const uint8_t *base, const uint8_t *texture,
 
 /* ---------- SSE4.2 skeleton (process 4 pixels via manual loads) ---------- */
 
-static inline __m128 u8x4_to_f32_sse(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
+/* 4-lane u8->f32 [0,1] from scalar bytes (works with interleaved strides) */
+static inline __m128 u8x4_to_unit_f32(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
     __m128i vi = _mm_setr_epi32((int)a, (int)b, (int)c, (int)d);
     return _mm_mul_ps(_mm_cvtepi32_ps(vi), _mm_set1_ps(1.0f/255.0f));
 }
 
+static inline __m128 load4_u8_to_unit_f32(const uint8_t *p) {
+    /* p[0..3] are consecutive bytes (for im_alpha) */
+    __m128i v8  = _mm_cvtsi32_si128(*(const int*)p);  /* 4 bytes into xmm */
+    __m128i v16 = _mm_cvtepu8_epi16(v8);              /* widen to 8 x u16, we use low 4 */
+    __m128i v32 = _mm_cvtepu16_epi32(v16);
+    return _mm_mul_ps(_mm_cvtepi32_ps(v32), _mm_set1_ps(1.0f/255.0f));
+}
+
+static inline __m128 clamp01_ps128(__m128 x) {
+    return _mm_min_ps(_mm_max_ps(x, _mm_set1_ps(0.0f)), _mm_set1_ps(1.0f));
+}
+
+static inline __m128 nan_to_num_ps128(__m128 x) {
+    __m128 cmp = _mm_cmpord_ps(x, x); /* 0 for NaN lanes */
+    return _mm_blendv_ps(_mm_set1_ps(0.0f), x, cmp);
+}
+
+
 static void kernel_sse42_rgb(const uint8_t *base, const uint8_t *texture,
                              const uint8_t *skin, const uint8_t *im_alpha,
                              uint8_t *out, npy_intp pixels) {
+    const __m128 half = _mm_set1_ps(0.5f);
+    const __m128 one  = _mm_set1_ps(1.0f);
+    const __m128 w    = _mm_set1_ps((float)SKIN_WEIGHT);
+    const __m128 invw = _mm_set1_ps(1.0f - (float)SKIN_WEIGHT);
+
     npy_intp i = 0;
     for (; i + 4 <= pixels; i += 4) {
-        /* Gather each channel manually for 4 pixels */
-        __m128 fb_r = u8x4_to_f32_sse(base[3*(i+0)+0], base[3*(i+1)+0],
-                                      base[3*(i+2)+0], base[3*(i+3)+0]);
-        __m128 fb_g = u8x4_to_f32_sse(base[3*(i+0)+1], base[3*(i+1)+1],
-                                      base[3*(i+2)+1], base[3*(i+3)+1]);
-        __m128 fb_b = u8x4_to_f32_sse(base[3*(i+0)+2], base[3*(i+1)+2],
-                                      base[3*(i+2)+2], base[3*(i+3)+2]);
+        __m128 fb_r = u8x4_to_unit_f32(base[3*(i+0)+0], base[3*(i+1)+0],
+                                       base[3*(i+2)+0], base[3*(i+3)+0]);
+        __m128 fb_g = u8x4_to_unit_f32(base[3*(i+0)+1], base[3*(i+1)+1],
+                                       base[3*(i+2)+1], base[3*(i+3)+1]);
+        __m128 fb_b = u8x4_to_unit_f32(base[3*(i+0)+2], base[3*(i+1)+2],
+                                       base[3*(i+2)+2], base[3*(i+3)+2]);
 
-        __m128 ft_r = u8x4_to_f32_sse(texture[3*(i+0)+0], texture[3*(i+1)+0],
-                                      texture[3*(i+2)+0], texture[3*(i+3)+0]);
-        __m128 ft_g = u8x4_to_f32_sse(texture[3*(i+0)+1], texture[3*(i+1)+1],
-                                      texture[3*(i+2)+1], texture[3*(i+3)+1]);
-        __m128 ft_b = u8x4_to_f32_sse(texture[3*(i+0)+2], texture[3*(i+1)+2],
-                                      texture[3*(i+2)+2], texture[3*(i+3)+2]);
+        __m128 ft_r = u8x4_to_unit_f32(texture[3*(i+0)+0], texture[3*(i+1)+0],
+                                       texture[3*(i+2)+0], texture[3*(i+3)+0]);
+        __m128 ft_g = u8x4_to_unit_f32(texture[3*(i+0)+1], texture[3*(i+1)+1],
+                                       texture[3*(i+2)+1], texture[3*(i+3)+1]);
+        __m128 ft_b = u8x4_to_unit_f32(texture[3*(i+0)+2], texture[3*(i+1)+2],
+                                       texture[3*(i+2)+2], texture[3*(i+3)+2]);
 
-        __m128 fs_r = u8x4_to_f32_sse(skin[4*(i+0)+0], skin[4*(i+1)+0],
-                                      skin[4*(i+2)+0], skin[4*(i+3)+0]);
-        __m128 fs_g = u8x4_to_f32_sse(skin[4*(i+0)+1], skin[4*(i+1)+1],
-                                      skin[4*(i+2)+1], skin[4*(i+3)+1]);
-        __m128 fs_b = u8x4_to_f32_sse(skin[4*(i+0)+2], skin[4*(i+1)+2],
-                                      skin[4*(i+2)+2], skin[4*(i+3)+2]);
-        __m128 fs_a = u8x4_to_f32_sse(skin[4*(i+0)+3], skin[4*(i+1)+3],
-                                      skin[4*(i+2)+3], skin[4*(i+3)+3]);
+        __m128 fs_r = u8x4_to_unit_f32(skin[4*(i+0)+0], skin[4*(i+1)+0],
+                                       skin[4*(i+2)+0], skin[4*(i+3)+0]);
+        __m128 fs_g = u8x4_to_unit_f32(skin[4*(i+0)+1], skin[4*(i+1)+1],
+                                       skin[4*(i+2)+1], skin[4*(i+3)+1]);
+        __m128 fs_b = u8x4_to_unit_f32(skin[4*(i+0)+2], skin[4*(i+1)+2],
+                                       skin[4*(i+2)+2], skin[4*(i+3)+2]);
 
-        float a_im_s[4];
-        for (int k = 0; k < 4; ++k) a_im_s[k] = im_alpha[i+k] * (1.0f/255.0f);
-        __m128 fa_im = _mm_loadu_ps(a_im_s);
+        __m128 fa_im = load4_u8_to_unit_f32(im_alpha + i);
+        __m128 fit_a = _mm_sub_ps(one, fa_im);
 
-        __m128 fr = fb_r, fg = fb_g, fbv = fb_b;  /* placeholder */
+        __m128 gm_r = clamp01_ps128(_mm_sub_ps(_mm_add_ps(ft_r, fs_r), half));
+        __m128 gm_g = clamp01_ps128(_mm_sub_ps(_mm_add_ps(ft_g, fs_g), half));
+        __m128 gm_b = clamp01_ps128(_mm_sub_ps(_mm_add_ps(ft_b, fs_b), half));
 
-        /* Store back */
+        gm_r = _mm_add_ps(_mm_mul_ps(gm_r, fa_im), _mm_mul_ps(ft_r, fit_a));
+        gm_g = _mm_add_ps(_mm_mul_ps(gm_g, fa_im), _mm_mul_ps(ft_g, fit_a));
+        gm_b = _mm_add_ps(_mm_mul_ps(gm_b, fa_im), _mm_mul_ps(ft_b, fit_a));
+
+        gm_r = _mm_add_ps(_mm_mul_ps(gm_r, invw), _mm_mul_ps(fs_r, w));
+        gm_g = _mm_add_ps(_mm_mul_ps(gm_g, invw), _mm_mul_ps(fs_g, w));
+        gm_b = _mm_add_ps(_mm_mul_ps(gm_b, invw), _mm_mul_ps(fs_b, w));
+
+        gm_r = nan_to_num_ps128(gm_r);
+        gm_g = nan_to_num_ps128(gm_g);
+        gm_b = nan_to_num_ps128(gm_b);
+
+        __m128 fr = _mm_add_ps(_mm_mul_ps(gm_r, fa_im), _mm_mul_ps(fb_r, fit_a));
+        __m128 fg = _mm_add_ps(_mm_mul_ps(gm_g, fa_im), _mm_mul_ps(fb_g, fit_a));
+        __m128 fb = _mm_add_ps(_mm_mul_ps(gm_b, fa_im), _mm_mul_ps(fb_b, fit_a));
+
         float rr[4], gg[4], bb[4];
         _mm_storeu_ps(rr, fr);
         _mm_storeu_ps(gg, fg);
-        _mm_storeu_ps(bb, fbv);
+        _mm_storeu_ps(bb, fb);
+
         for (int k = 0; k < 4; ++k) {
-            int r = (int)(rr[k]*255.0f + 0.5f);
-            int g = (int)(gg[k]*255.0f + 0.5f);
-            int b = (int)(bb[k]*255.0f + 0.5f);
+            int r = (int)(rr[k] * 255.0f);
+            int g = (int)(gg[k] * 255.0f);
+            int b = (int)(bb[k] * 255.0f);
             out[3*(i+k)+0] = (uint8_t)(r < 0 ? 0 : r > 255 ? 255 : r);
             out[3*(i+k)+1] = (uint8_t)(g < 0 ? 0 : g > 255 ? 255 : g);
             out[3*(i+k)+2] = (uint8_t)(b < 0 ? 0 : b > 255 ? 255 : b);
         }
     }
+
     if (i < pixels) {
         kernel_scalar_rgb(base + 3*i, texture + 3*i, skin + 4*i, im_alpha + i,
                           out + 3*i, pixels - i);
@@ -465,57 +568,81 @@ static void kernel_sse42_rgb(const uint8_t *base, const uint8_t *texture,
 static void kernel_sse42_rgba(const uint8_t *base, const uint8_t *texture,
                               const uint8_t *skin, const uint8_t *im_alpha,
                               uint8_t *out, npy_intp pixels) {
+    const __m128 half = _mm_set1_ps(0.5f);
+    const __m128 one  = _mm_set1_ps(1.0f);
+    const __m128 w    = _mm_set1_ps((float)SKIN_WEIGHT);
+    const __m128 invw = _mm_set1_ps(1.0f - (float)SKIN_WEIGHT);
+
     npy_intp i = 0;
     for (; i + 4 <= pixels; i += 4) {
-        __m128 fb_r = u8x4_to_f32_sse(base[3*(i+0)+0], base[3*(i+1)+0],
-                                      base[3*(i+2)+0], base[3*(i+3)+0]);
-        __m128 fb_g = u8x4_to_f32_sse(base[3*(i+0)+1], base[3*(i+1)+1],
-                                      base[3*(i+2)+1], base[3*(i+3)+1]);
-        __m128 fb_b = u8x4_to_f32_sse(base[3*(i+0)+2], base[3*(i+1)+2],
-                                      base[3*(i+2)+2], base[3*(i+3)+2]);
+        __m128 fb_r = u8x4_to_unit_f32(base[3*(i+0)+0], base[3*(i+1)+0],
+                                       base[3*(i+2)+0], base[3*(i+3)+0]);
+        __m128 fb_g = u8x4_to_unit_f32(base[3*(i+0)+1], base[3*(i+1)+1],
+                                       base[3*(i+2)+1], base[3*(i+3)+1]);
+        __m128 fb_b = u8x4_to_unit_f32(base[3*(i+0)+2], base[3*(i+1)+2],
+                                       base[3*(i+2)+2], base[3*(i+3)+2]);
 
-        __m128 ft_r = u8x4_to_f32_sse(texture[4*(i+0)+0], texture[4*(i+1)+0],
-                                      texture[4*(i+2)+0], texture[4*(i+3)+0]);
-        __m128 ft_g = u8x4_to_f32_sse(texture[4*(i+0)+1], texture[4*(i+1)+1],
-                                      texture[4*(i+2)+1], texture[4*(i+3)+1]);
-        __m128 ft_b = u8x4_to_f32_sse(texture[4*(i+0)+2], texture[4*(i+1)+2],
-                                      texture[4*(i+2)+2], texture[4*(i+3)+2]);
-        __m128 ft_a = u8x4_to_f32_sse(texture[4*(i+0)+3], texture[4*(i+1)+3],
-                                      texture[4*(i+2)+3], texture[4*(i+3)+3]);
+        __m128 ft_r = u8x4_to_unit_f32(texture[4*(i+0)+0], texture[4*(i+1)+0],
+                                       texture[4*(i+2)+0], texture[4*(i+3)+0]);
+        __m128 ft_g = u8x4_to_unit_f32(texture[4*(i+0)+1], texture[4*(i+1)+1],
+                                       texture[4*(i+2)+1], texture[4*(i+3)+1]);
+        __m128 ft_b = u8x4_to_unit_f32(texture[4*(i+0)+2], texture[4*(i+1)+2],
+                                       texture[4*(i+2)+2], texture[4*(i+3)+2]);
+        __m128 ft_a = u8x4_to_unit_f32(texture[4*(i+0)+3], texture[4*(i+1)+3],
+                                       texture[4*(i+2)+3], texture[4*(i+3)+3]);
 
-        __m128 fs_r = u8x4_to_f32_sse(skin[4*(i+0)+0], skin[4*(i+1)+0],
-                                      skin[4*(i+2)+0], skin[4*(i+3)+0]);
-        __m128 fs_g = u8x4_to_f32_sse(skin[4*(i+0)+1], skin[4*(i+1)+1],
-                                      skin[4*(i+2)+1], skin[4*(i+3)+1]);
-        __m128 fs_b = u8x4_to_f32_sse(skin[4*(i+0)+2], skin[4*(i+1)+2],
-                                      skin[4*(i+2)+2], skin[4*(i+3)+2]);
-        __m128 fs_a = u8x4_to_f32_sse(skin[4*(i+0)+3], skin[4*(i+1)+3],
-                                      skin[4*(i+2)+3], skin[4*(i+3)+3]);
+        __m128 fs_r = u8x4_to_unit_f32(skin[4*(i+0)+0], skin[4*(i+1)+0],
+                                       skin[4*(i+2)+0], skin[4*(i+3)+0]);
+        __m128 fs_g = u8x4_to_unit_f32(skin[4*(i+0)+1], skin[4*(i+1)+1],
+                                       skin[4*(i+2)+1], skin[4*(i+3)+1]);
+        __m128 fs_b = u8x4_to_unit_f32(skin[4*(i+0)+2], skin[4*(i+1)+2],
+                                       skin[4*(i+2)+2], skin[4*(i+3)+2]);
 
-        float a_im_s[4];
-        for (int k = 0; k < 4; ++k) a_im_s[k] = im_alpha[i+k] * (1.0f/255.0f);
-        __m128 fa_im = _mm_loadu_ps(a_im_s);
+        __m128 fa_im = load4_u8_to_unit_f32(im_alpha + i);
+        __m128 fta   = _mm_mul_ps(ft_a, fa_im);   /* texture_alpha */
+        __m128 fit_a = _mm_sub_ps(one, fta);
 
-        __m128 fr = fb_r, fg = fb_g, fbv = fb_b;  /* placeholder */
+        __m128 gm_r = clamp01_ps128(_mm_sub_ps(_mm_add_ps(ft_r, fs_r), half));
+        __m128 gm_g = clamp01_ps128(_mm_sub_ps(_mm_add_ps(ft_g, fs_g), half));
+        __m128 gm_b = clamp01_ps128(_mm_sub_ps(_mm_add_ps(ft_b, fs_b), half));
+
+        gm_r = _mm_add_ps(_mm_mul_ps(gm_r, fta), _mm_mul_ps(ft_r, fit_a));
+        gm_g = _mm_add_ps(_mm_mul_ps(gm_g, fta), _mm_mul_ps(ft_g, fit_a));
+        gm_b = _mm_add_ps(_mm_mul_ps(gm_b, fta), _mm_mul_ps(ft_b, fit_a));
+
+        gm_r = _mm_add_ps(_mm_mul_ps(gm_r, invw), _mm_mul_ps(fs_r, w));
+        gm_g = _mm_add_ps(_mm_mul_ps(gm_g, invw), _mm_mul_ps(fs_g, w));
+        gm_b = _mm_add_ps(_mm_mul_ps(gm_b, invw), _mm_mul_ps(fs_b, w));
+
+        gm_r = nan_to_num_ps128(gm_r);
+        gm_g = nan_to_num_ps128(gm_g);
+        gm_b = nan_to_num_ps128(gm_b);
+
+        __m128 fr = _mm_add_ps(_mm_mul_ps(gm_r, fta), _mm_mul_ps(fb_r, fit_a));
+        __m128 fg = _mm_add_ps(_mm_mul_ps(gm_g, fta), _mm_mul_ps(fb_g, fit_a));
+        __m128 fb = _mm_add_ps(_mm_mul_ps(gm_b, fta), _mm_mul_ps(fb_b, fit_a));
 
         float rr[4], gg[4], bb[4];
         _mm_storeu_ps(rr, fr);
         _mm_storeu_ps(gg, fg);
-        _mm_storeu_ps(bb, fbv);
+        _mm_storeu_ps(bb, fb);
+
         for (int k = 0; k < 4; ++k) {
-            int r = (int)(rr[k]*255.0f + 0.5f);
-            int g = (int)(gg[k]*255.0f + 0.5f);
-            int b = (int)(bb[k]*255.0f + 0.5f);
+            int r = (int)(rr[k] * 255.0f);
+            int g = (int)(gg[k] * 255.0f);
+            int b = (int)(bb[k] * 255.0f);
             out[3*(i+k)+0] = (uint8_t)(r < 0 ? 0 : r > 255 ? 255 : r);
             out[3*(i+k)+1] = (uint8_t)(g < 0 ? 0 : g > 255 ? 255 : g);
             out[3*(i+k)+2] = (uint8_t)(b < 0 ? 0 : b > 255 ? 255 : b);
         }
     }
+
     if (i < pixels) {
         kernel_scalar_rgba(base + 3*i, texture + 4*i, skin + 4*i, im_alpha + i,
                            out + 3*i, pixels - i);
     }
 }
+
 
 /* ---------- Kernel dispatch ---------- */
 

@@ -6,7 +6,7 @@ extra_compile_args = []
 
 extra_compile_args = []
 if sys.platform == "win32":
-    extra_compile_args += ["/O2", "/arch:AVX2"]  # enables AVX/AVX2; SSE4.2 implied
+    extra_compile_args += ["/O2", "/arch:AVX2", "/Qpar"]  # enables AVX/AVX2; SSE4.2 implied
 else:
     extra_compile_args += ["-O3", "-march=x86-64-v3", "-mavx2", "-msse4.2"]
 
