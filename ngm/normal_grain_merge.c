@@ -7,8 +7,69 @@
 #include <smmintrin.h>
 #include <immintrin.h>  /* AVX2 + SSE4.2 */
 
-#if defined(__GNUC__) || defined(__clang__)
-#define HAVE_BUILTIN_CPU_SUPPORTS 1
+/* ----- Runtime CPU feature detection (GCC/Clang + MSVC) ----- */
+#if defined(_MSC_VER)
+  #include <intrin.h>
+  static int os_supports_avx(void) {
+      /* Check OSXSAVE + XCR0[2:1] == 11b so OS saves YMM state */
+      int cpuInfo[4];
+      __cpuid(cpuInfo, 1);
+      int ecx = cpuInfo[2];
+      int osxsave = (ecx >> 27) & 1;
+      if (!osxsave) return 0;
+      unsigned long long xcr0 = _xgetbv(0);
+      return ((xcr0 & 0x6) == 0x6); /* XMM (bit1) and YMM (bit2) state enabled */
+  }
+
+  static int cpu_supports_avx2(void) {
+      int cpuInfo[4];
+      __cpuid(cpuInfo, 1);
+      int ecx = cpuInfo[2];
+      int avx   = (ecx >> 28) & 1;
+      int osxsave = (ecx >> 27) & 1;
+      if (!(avx && osxsave && os_supports_avx())) return 0;
+
+      /* Leaf 7, subleaf 0: EBX bit 5 = AVX2 */
+      int ex[4];
+      __cpuidex(ex, 7, 0);
+      int ebx = ex[1];
+      return (ebx >> 5) & 1;
+  }
+
+  static int cpu_supports_sse42(void) {
+      int cpuInfo[4];
+      __cpuid(cpuInfo, 1);
+      int ecx = cpuInfo[2];
+      return (ecx >> 20) & 1; /* SSE4.2 */
+  }
+#else
+  /* GCC/Clang path */
+  static int os_supports_avx(void) {
+  #if defined(__GNUC__) || defined(__clang__)
+      /* If we’re here, assume OS supports AVX when the CPU supports it.
+         For full rigor you can also call xgetbv via inline asm, but it’s uncommon to lack it. */
+      return 1;
+  #else
+      return 0;
+  #endif
+  }
+
+  static int cpu_supports_avx2(void) {
+  #if defined(__GNUC__) || defined(__clang__)
+      /* Requires -mavx2 at compile, but we only *call* the AVX2 kernel if true. */
+      return __builtin_cpu_supports("avx2");
+  #else
+      return 0;
+  #endif
+  }
+
+  static int cpu_supports_sse42(void) {
+  #if defined(__GNUC__) || defined(__clang__)
+      return __builtin_cpu_supports("sse4.2");
+  #else
+      return 0;
+  #endif
+  }
 #endif
 
 #define SKIN_WEIGHT 0.3f
@@ -23,7 +84,7 @@ typedef enum {
 /* ---------- Utility: safe views, shape checks ---------- */
 
 /* Make a new uint8, C-contiguous, aligned view we own. Never DECREF the input obj. */
-static int get_uint8_c_contig(PyObject *obj, PyArrayObject **out, const char *name) {
+static inline int get_uint8_c_contig(PyObject *obj, PyArrayObject **out, const char *name) {
     const int flags = NPY_ARRAY_ALIGNED | NPY_ARRAY_C_CONTIGUOUS;
     PyArrayObject *arr = (PyArrayObject*)PyArray_FROM_OTF(obj, NPY_UINT8, flags);
     if (!arr) {
@@ -34,7 +95,7 @@ static int get_uint8_c_contig(PyObject *obj, PyArrayObject **out, const char *na
     return 1;
 }
 
-static int ensure_uint8_contig(PyArrayObject **arr, const char *name) {
+static inline int ensure_uint8_contig(PyArrayObject **arr, const char *name) {
     PyArrayObject *tmp = (PyArrayObject*)PyArray_FROM_OTF(
         (PyObject*)(*arr), NPY_UINT8, NPY_ARRAY_ALIGNED | NPY_ARRAY_C_CONTIGUOUS);
     if (!tmp) return 0;
@@ -43,7 +104,7 @@ static int ensure_uint8_contig(PyArrayObject **arr, const char *name) {
     return 1;
 }
 
-static int check_shape_requirements(PyArrayObject *base,
+static inline int check_shape_requirements(PyArrayObject *base,
                                     PyArrayObject *texture,
                                     PyArrayObject *skin,
                                     PyArrayObject *im_alpha,
@@ -651,15 +712,11 @@ static kernel_kind pick_kernel(const char *force_name) {
         if (strcmp(force_name, "scalar") == 0) return KERNEL_SCALAR;
         if (strcmp(force_name, "sse42")  == 0) return KERNEL_SSE42;
         if (strcmp(force_name, "avx2")   == 0) return KERNEL_AVX2;
-        if (strcmp(force_name, "auto")   == 0) return KERNEL_AUTO;
+        if (strcmp(force_name, "auto")   == 0) {/* fall through */}
     }
-#if HAVE_BUILTIN_CPU_SUPPORTS
-    if (!force_name || strcmp(force_name, "auto") == 0) {
-        if (__builtin_cpu_supports("avx2")) return KERNEL_AVX2;
-        if (__builtin_cpu_supports("sse4.2")) return KERNEL_SSE42;
-        return KERNEL_SCALAR;
-    }
-#endif
+    /* Auto: prefer AVX2, then SSE4.2, else scalar */
+    if (cpu_supports_avx2() && os_supports_avx()) return KERNEL_AVX2;
+    if (cpu_supports_sse42()) return KERNEL_SSE42;
     return KERNEL_SCALAR;
 }
 
