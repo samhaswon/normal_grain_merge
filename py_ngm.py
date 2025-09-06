@@ -1,3 +1,4 @@
+from blend_modes import grain_merge, normal
 import cv2
 import numpy as np
 
@@ -6,6 +7,14 @@ SKIN_WEIGHT = 0.3
 
 
 def normal_grain_merge_py(base: np.array, texture: np.array, skin: np.array, im_alpha: np.array):
+    """
+    Python Implementation of fused normal and grain merge.
+    :param base: RGB or RGBA image base.
+    :param texture: RGB or RGBA texture.
+    :param skin: RGBA skin layer.
+    :param im_alpha: Skin alpha channel.
+    :return: RGB np.ndarray.
+    """
     base = base / 255.0
     texture = texture / 255.0
     skin = skin / 255.0
@@ -41,6 +50,14 @@ def normal_grain_merge_py(base: np.array, texture: np.array, skin: np.array, im_
 
 
 def apply_texture(original: np.ndarray, skin: np.array, texture: np.array, im_alpha: np.array) -> np.array:
+    """
+    Python Implementation of fused normal and grain merge with preprocessing.
+    :param original: RGB or RGBA image base.
+    :param texture: RGB or RGBA texture.
+    :param skin: RGBA skin layer.
+    :param im_alpha: Skin alpha channel.
+    :return: RGB np.ndarray.
+    """
     bw_masked = cv2.cvtColor(
         cv2.cvtColor(
             skin,
@@ -55,3 +72,24 @@ def apply_texture(original: np.ndarray, skin: np.array, texture: np.array, im_al
     )
     return mix_layer
 
+
+def normal_grain_merge_old(original: np.ndarray, texture: np.array, skin: np.array, im_alpha: np.array) -> np.array:
+    """
+    Python Implementation of non-fused normal and grain merge.
+    This is slow.
+    :param original: RGB or RGBA image base.
+    :param texture: RGB or RGBA texture.
+    :param skin: RGBA skin layer.
+    :param im_alpha: Skin alpha channel.
+    :return: RGB np.ndarray.
+    """
+    bw_masked = cv2.cvtColor(skin, cv2.COLOR_BGR2BGRA).astype(np.float32)
+    texture_float = np.dstack((texture, im_alpha)).astype(np.float32)
+    mix_layer = grain_merge(texture_float, bw_masked, 1.0)
+    mix_layer = np.uint8(
+        normal(
+            cv2.cvtColor(np.array(original), cv2.COLOR_RGB2BGRA).astype(np.float32),
+            mix_layer,
+            1.0)
+    )
+    return mix_layer
