@@ -5,4 +5,5 @@ build/
 *.pyd
 ngm.egg-info/
 __pycache__*
-*.png
+expected_result.png
+result.png

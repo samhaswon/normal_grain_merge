@@ -1,15 +1,11 @@
+"""
+Quick test/demo script
+"""
 import cv2
 import numpy as np
 
 from ngm import normal_grain_merge, KernelKind
 from py_ngm import apply_texture
-
-
-def percent_change(new_t: float, old_t: float):
-    return -(new_t - old_t) / old_t * 100
-
-
-ITERATIONS = 200
 
 
 base = np.zeros((100, 100, 3), dtype=np.uint8)
@@ -21,9 +17,9 @@ result_scalar = normal_grain_merge(base, texture, skin, im_alpha, KernelKind.KER
 print(result_scalar.shape, result_scalar.dtype)
 
 # actual test
-base = cv2.imread("base.png")
-texture = cv2.imread("texture.png")
-skin = cv2.imread("skin.png", cv2.IMREAD_UNCHANGED)
+base = cv2.imread("tests/base.png")
+texture = cv2.imread("tests/texture.png")
+skin = cv2.imread("tests/skin.png", cv2.IMREAD_UNCHANGED)
 im_alpha = skin[..., 3]
 result_py = apply_texture(base, skin, texture, im_alpha)
 skin = cv2.cvtColor(
