@@ -4,7 +4,7 @@ Quick test/demo script
 import cv2
 import numpy as np
 
-from ngm import normal_grain_merge, KernelKind
+from normal_grain_merge import normal_grain_merge, KernelKind
 from py_ngm import apply_texture
 
 
