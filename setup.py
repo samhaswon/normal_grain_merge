@@ -4,7 +4,6 @@ import sys
 
 extra_compile_args = []
 
-extra_compile_args = []
 if sys.platform == "win32":
     extra_compile_args += ["/O2", "/arch:AVX2", "/Qpar"]  # enables AVX/AVX2; SSE4.2 implied
 else:
