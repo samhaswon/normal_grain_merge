@@ -722,6 +722,44 @@ static kernel_kind pick_kernel(const char *force_name) {
 
 /* ---------- Python binding ---------- */
 
+/* Convert base (H,W,3 or H,W,4) -> packed RGB (H,W,3). Returns a NEW ref.
+   If base is already (H,W,3), this returns a new C-contig copy of it (to be safe). */
+static PyArrayObject* ensure_base_rgb(PyArrayObject *base_in, const char *name) {
+    if (PyArray_NDIM(base_in) != 3) {
+        PyErr_Format(PyExc_ValueError, "%s must have shape (H, W, 3) or (H, W, 4)", name);
+        return NULL;
+    }
+    npy_intp const *dims_in = PyArray_DIMS(base_in);
+    npy_intp H = dims_in[0], W = dims_in[1], C = dims_in[2];
+    if (!(C == 3 || C == 4)) {
+        PyErr_Format(PyExc_ValueError, "%s must have 3 or 4 channels", name);
+        return NULL;
+    }
+
+    /* Always produce a fresh C-contiguous uint8 (H,W,3) we own. */
+    npy_intp dims_out[3] = {H, W, 3};
+    PyArrayObject *base_rgb = (PyArrayObject*)PyArray_SimpleNew(3, dims_out, NPY_UINT8);
+    if (!base_rgb) return NULL;
+
+    const uint8_t *src = (const uint8_t*)PyArray_DATA(base_in);
+    uint8_t *dst       = (uint8_t*)PyArray_DATA(base_rgb);
+    const npy_intp pixels = H * W;
+
+    if (C == 3) {
+        /* Packed copy */
+        memcpy(dst, src, (size_t)(pixels * 3));
+        return base_rgb;
+    }
+
+    /* C == 4: strip alpha, keep RGB packed */
+    for (npy_intp i = 0; i < pixels; ++i) {
+        dst[3*i + 0] = src[4*i + 0];
+        dst[3*i + 1] = src[4*i + 1];
+        dst[3*i + 2] = src[4*i + 2];
+    }
+    return base_rgb;
+}
+
 static PyObject* py_normal_grain_merge(PyObject* self, PyObject* args, PyObject* kwargs) {
     static char *kwlist[] = {"base", "texture", "skin", "im_alpha", "kernel", NULL};
 
@@ -735,14 +773,23 @@ static PyObject* py_normal_grain_merge(PyObject* self, PyObject* args, PyObject*
     }
 
     /* Materialize arrays we own. Do NOT decref the *_obj borrowed refs. */
-    PyArrayObject *base = NULL, *texture = NULL, *skin = NULL, *im_alpha = NULL;
-    if (!get_uint8_c_contig(base_obj, &base, "base") ||
+    /* Borrowed -> owned, uint8, C-contig (you already have get_uint8_c_contig) */
+    PyArrayObject *base_u8 = NULL, *texture = NULL, *skin = NULL, *im_alpha = NULL;
+    if (!get_uint8_c_contig(base_obj, &base_u8, "base") ||
         !get_uint8_c_contig(texture_obj, &texture, "texture") ||
         !get_uint8_c_contig(skin_obj, &skin, "skin") ||
         !get_uint8_c_contig(im_alpha_obj, &im_alpha, "im_alpha")) {
-        Py_XDECREF(base); Py_XDECREF(texture); Py_XDECREF(skin); Py_XDECREF(im_alpha);
+        Py_XDECREF(base_u8); Py_XDECREF(texture); Py_XDECREF(skin); Py_XDECREF(im_alpha);
         return NULL;
     }
+
+    /* If base is RGBA, pack to RGB; if it’s already RGB, make a packed copy */
+    PyArrayObject *base = ensure_base_rgb(base_u8, "base");
+    if (!base) {
+        Py_DECREF(base_u8); Py_DECREF(texture); Py_DECREF(skin); Py_DECREF(im_alpha);
+        return NULL;
+    }
+    Py_DECREF(base_u8);  /* drop the intermediate reference, we own `base` now */
 
     int texture_has_alpha = 0;
     npy_intp H = 0, W = 0;

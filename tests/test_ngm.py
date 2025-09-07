@@ -135,6 +135,33 @@ class TestNGM(unittest.TestCase):
         self.assertLessEqual(max_diff_avx, 1, msg=f"max abs diff avx: {max_diff_avx}")
         self.assertLessEqual(max_diff_auto, 1, msg=f"max abs diff auto: {max_diff_auto}")
 
+    def test_rgba_base(self):
+        """
+        Test that an RGBA base appropriately drops the alpha channel.
+        """
+        self.base = np.dstack((self.base, np.ones(self.base.shape[:2]) * 255)).astype(np.uint8)
+        result_py = apply_texture(self.base, self.skin, self.texture, self.im_alpha)
+        self.skin = cv2.cvtColor(
+            cv2.cvtColor(
+                self.skin[..., :3],
+                cv2.COLOR_BGR2GRAY),
+            cv2.COLOR_GRAY2BGR
+        )
+        # Skin is BGR at this point
+        self.skin = np.dstack([self.skin, self.im_alpha])
+        result_scalar = normal_grain_merge(self.base, self.texture, self.skin, self.im_alpha, KernelKind.KERNEL_SCALAR.value)
+        result_sse = normal_grain_merge(self.base, self.texture, self.skin, self.im_alpha, KernelKind.KERNEL_SSE42.value)
+        result_avx = normal_grain_merge(self.base, self.texture, self.skin, self.im_alpha, KernelKind.KERNEL_AVX2.value)
+        result_auto = normal_grain_merge(self.base, self.texture, self.skin, self.im_alpha)
+        max_diff_scalar = np.abs(result_py.astype(np.int16) - result_scalar.astype(np.int16)).max()
+        max_diff_sse = np.abs(result_py.astype(np.int16) - result_sse.astype(np.int16)).max()
+        max_diff_avx = np.abs(result_py.astype(np.int16) - result_avx.astype(np.int16)).max()
+        max_diff_auto = np.abs(result_py.astype(np.int16) - result_auto.astype(np.int16)).max()
+        self.assertLessEqual(max_diff_scalar, 1, msg=f"max abs diff scalar: {max_diff_scalar}")
+        self.assertLessEqual(max_diff_sse, 1, msg=f"max abs diff sse: {max_diff_sse}")
+        self.assertLessEqual(max_diff_avx, 1, msg=f"max abs diff avx: {max_diff_avx}")
+        self.assertLessEqual(max_diff_auto, 1, msg=f"max abs diff auto: {max_diff_auto}")
+
 
 if __name__ == '__main__':
     unittest.main()
