@@ -5,13 +5,7 @@ Grain merge is performed on *s* and *t* with the result normal-merged with *b*.
 Subscripts indicate channels, with alpha (α) channels broadcast to three channels.
 
 $$
-\def\sw{0.3}
-\def\b{\mathrm{b_{rgb}}}
-\def\t{\mathrm{t_{rgb}}}
-\def\s{\mathrm{s_{rgb}}}
-\def\al{\mathrm{alpha}}
-\def\ta{\mathrm{t_\alpha}}
-(((\t + \s - 0.5) * \ta + \t * (1 - \ta)) * (1 - \sw) + \s * \sw) * \ta + \b * (1 - \ta)
+(((\mathrm{t_{rgb}} + \mathrm{s_{rgb}} - 0.5) * \mathrm{t_\alpha} + \mathrm{t_{rgb}} * (1 - \mathrm{t_\alpha})) * (1 - 0.3) + \mathrm{s_{rgb}} * 0.3) * \mathrm{t_\alpha} + \mathrm{b_{rgb}} * (1 - \mathrm{t_\alpha})
 $$
 
 ## Usage
