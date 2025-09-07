@@ -1,11 +1,16 @@
+import platform
 from setuptools import setup, Extension
-import numpy
 import sys
+import numpy
 
+
+arch = platform.machine().lower()
 extra_compile_args = []
 
 if sys.platform == "win32":
     extra_compile_args += ["/O2", "/arch:AVX2", "/Qpar"]  # enables AVX/AVX2; SSE4.2 implied
+elif "arm" in arch or "aarch64" in arch:
+    extra_compile_args += ["-O3"]
 else:
     extra_compile_args += ["-O3", "-march=x86-64", "-mavx2", "-msse4.2"]
 
