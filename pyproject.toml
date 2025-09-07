@@ -22,7 +22,9 @@ classifiers = [
     "Programming Language :: C",
     "Operating System :: OS Independent",
 ]
-keywords = [""
+keywords = [
+    "image",
+    "processing"
 ]
 [project.urls]
 "Homepage" = "https://github.com/samhaswon/normal_grain_merge"
