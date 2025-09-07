@@ -58,3 +58,27 @@ This is mostly a holdover from the Python implementation to deal with NumPy.
 #### `kernel`
 
 One of `KernelKind`.
+
+## Performance
+
+The entire reason for me writing this was NumPy being slow when this operation is in the hot path.
+So, I decided to write a SIMD version that does the type casting outside NumPy with only the intermediate values being in FP32.
+
+How much of a speedup is this? All numbers are from a Ryzen 7 4800H running Windows 11 and Python 3.12.4.
+
+| Method/Kernel     | Average Iteration Time |
+|-------------------|------------------------|
+| C scalar kernel   | 0.019565s              |
+| C SSE4.2 kernel   | 0.013705s              |
+| C AVX2 kernel     | 0.016842s              |
+| NumPy version     | 0.228098s              |
+| Old NumPy version | 0.350554s              |
+
+| Method Comparison  | Speedup  |
+|--------------------|----------|
+| NumPy -> scalar    | 91.4227% |
+| NumPy -> SSE4.2    | 93.9915% |
+| NumPy -> AVX2      | 92.6165% |
+| Old np -> SSE4.2   | 96.0904% |
+| C scalar -> SSE4.2 | 29.9487% |
+| C scalar -> AVX2   | 13.9183% |
