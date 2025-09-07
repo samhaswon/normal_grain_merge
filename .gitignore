@@ -2,6 +2,7 @@
 .vscode/
 .venv/
 build/
+dist/
 *.pyd
 ngm.egg-info/
 normal_grain_merge.egg-info/
