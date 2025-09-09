@@ -8,6 +8,12 @@ $$
 (((\mathrm{t_{rgb}} + \mathrm{s_{rgb}} - 0.5) * \mathrm{t_\alpha} + \mathrm{t_{rgb}} * (1 - \mathrm{t_\alpha})) * (1 - 0.3) + \mathrm{s_{rgb}} * 0.3) * \mathrm{t_\alpha} + \mathrm{b_{rgb}} * (1 - \mathrm{t_\alpha})
 $$
 
+## Installation
+
+```shell
+pip install normal-grain-merge
+```
+
 ## Usage
 ```py
 import numpy as np
