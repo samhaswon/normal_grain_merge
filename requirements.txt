@@ -1,2 +1,5 @@
 numpy<2.3.0
 opencv-python==4.12.0.88
+setuptools>=68.0.0
+build
+blend_modes

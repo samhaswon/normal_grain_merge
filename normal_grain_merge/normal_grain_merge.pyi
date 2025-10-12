@@ -16,7 +16,7 @@ def normal_grain_merge(
     Channel ordering doesn't matter as long as it is consistent.
     :param base: The base RGB image.
     :param texture: The texture, either RGB or RGBA.
-    :param skin: The RGBA skin cutout.
+    :param skin: The RGB skin cutout.
     :param im_alpha: The alpha from the cutout.
     :param kernel: Which kernel to use.
     The `auto` kernel chooses between avx2 and sse4.2 when compiled with gcc and uses `scaler` on Windows.

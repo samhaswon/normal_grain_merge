@@ -1,6 +1,8 @@
-build:
-	py -m build
+build: normal_grain_merge/normal_grain_merge.c
+	python3 -m build
 
-full:
+install:
 	pip install --force-reinstall .
-	copy .venv\\Lib\\site-packages\\normal_grain_merge\\*.pyd normal_grain_merge\\
+	cp venv/lib/python3.12/site-packages/normal_grain_merge/*.so normal_grain_merge/
+
+all: build install

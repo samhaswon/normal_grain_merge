@@ -30,16 +30,15 @@ class TestNGM(unittest.TestCase):
         global_start = time.perf_counter()
         base = cv2.imread("base.png")
         texture = cv2.imread("texture.png")
-        skin = cv2.imread("skin.png", cv2.IMREAD_UNCHANGED)
-        im_alpha = skin[..., 3]
+        skin = base.copy()
+        im_alpha = cv2.imread("skin.png", cv2.IMREAD_UNCHANGED)[..., 3]
         skin = cv2.cvtColor(
             cv2.cvtColor(
-                skin[..., :3],
+                skin,
                 cv2.COLOR_BGR2GRAY),
             cv2.COLOR_GRAY2BGR
         )
         # Skin is BGR at this point
-        skin = np.dstack([skin, im_alpha])
 
         # Scaler kernel
         start_c_scalar = time.perf_counter()
@@ -60,7 +59,6 @@ class TestNGM(unittest.TestCase):
         end_c_avx = time.perf_counter()
 
         # NumPy "just do less" version.
-        skin = skin[..., :3]
         start_py = time.perf_counter()
         for _ in range(ITERATIONS):
             result = normal_grain_merge_py(base, texture, skin, im_alpha)
@@ -90,6 +88,7 @@ class TestNGM(unittest.TestCase):
               f"NumPy -> SSE4.2: {percent_change(c_avg_sse, np_avg):.4f}%\n"
               f"NumPy -> AVX2:   {percent_change(c_avg_avx, np_avg):.4f}%\n"
               f"Old np -> SSE:   {percent_change(c_avg_sse, np_old_avg):.4f}%\n"
+              f"Old np -> AVX2:  {percent_change(c_avg_avx, np_old_avg):.4f}%\n"
               f"C scalar -> SSE: {percent_change(c_avg_sse, c_avg_scalar):.4f}%\n"
               f"C scalar -> AVX: {percent_change(c_avg_avx, c_avg_scalar):.4f}%\n")
         print(f"Test time: {end - global_start:.4f}s")

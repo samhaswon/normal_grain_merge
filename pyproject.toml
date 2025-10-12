@@ -8,7 +8,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "normal_grain_merge"
-version = "0.0.2"
+version = "0.1.0"
 description = "Fused normal and grain merge C extension"
 readme = "README.md"
 authors = [

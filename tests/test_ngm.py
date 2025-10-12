@@ -33,8 +33,8 @@ class TestNGM(unittest.TestCase):
         """
         self.base = cv2.imread("base.png")
         self.texture = cv2.imread("texture.png")
-        self.skin = cv2.imread("skin.png", cv2.IMREAD_UNCHANGED)
-        self.im_alpha = self.skin[..., 3]
+        self.skin = self.base.copy()
+        self.im_alpha = cv2.imread("skin.png", cv2.IMREAD_UNCHANGED)[..., 3]
 
     def test_dummy_arrays(self):
         """
@@ -42,7 +42,7 @@ class TestNGM(unittest.TestCase):
         """
         base = np.zeros((100, 100, 3), dtype=np.uint8)
         texture = np.zeros((100, 100, 3), dtype=np.uint8)
-        skin = np.zeros((100, 100, 4), dtype=np.uint8)
+        skin = np.zeros((100, 100, 3), dtype=np.uint8)
         im_alpha = np.zeros((100, 100), dtype=np.uint8)
 
         result_scalar = normal_grain_merge(base, texture, skin, im_alpha, KernelKind.KERNEL_SCALAR.value)
@@ -53,15 +53,14 @@ class TestNGM(unittest.TestCase):
         """
         Test the common case; RGB versions of each kernel.
         """
-        result_py = apply_texture(self.base, self.skin, self.texture, self.im_alpha)
+        result_py = apply_texture(self.base, np.dstack([self.skin, self.im_alpha]), self.texture, self.im_alpha)
         self.skin = cv2.cvtColor(
             cv2.cvtColor(
-                self.skin[..., :3],
+                self.skin,
                 cv2.COLOR_BGR2GRAY),
             cv2.COLOR_GRAY2BGR
         )
         # Skin is BGR at this point
-        self.skin = np.dstack([self.skin, self.im_alpha])
         result_scalar = normal_grain_merge(self.base, self.texture, self.skin, self.im_alpha, KernelKind.KERNEL_SCALAR.value)
         result_sse = normal_grain_merge(self.base, self.texture, self.skin, self.im_alpha, KernelKind.KERNEL_SSE42.value)
         result_avx = normal_grain_merge(self.base, self.texture, self.skin, self.im_alpha, KernelKind.KERNEL_AVX2.value)
@@ -81,15 +80,14 @@ class TestNGM(unittest.TestCase):
         """
         self.skin = cv2.cvtColor(
             cv2.cvtColor(
-                self.skin[..., :3],
+                self.skin,
                 cv2.COLOR_BGR2GRAY),
             cv2.COLOR_GRAY2BGR
         )
         mask = vertical_fill(self.base.shape[0], self.base.shape[1], self.base.shape[1] // 2)
         new_alpha = np.bitwise_and(self.im_alpha, mask)
-        self.skin = np.dstack((self.skin[..., :3], new_alpha))
 
-        result_py = apply_texture(self.base, self.skin, self.texture, new_alpha)
+        result_py = apply_texture(self.base, np.dstack((self.skin[..., :3], new_alpha)), self.texture, new_alpha)
         result_scalar = normal_grain_merge(self.base, self.texture, self.skin, new_alpha, KernelKind.KERNEL_SCALAR.value)
         result_sse = normal_grain_merge(self.base, self.texture, self.skin, new_alpha, KernelKind.KERNEL_SSE42.value)
         result_avx = normal_grain_merge(self.base, self.texture, self.skin, new_alpha, KernelKind.KERNEL_AVX2.value)
@@ -114,13 +112,12 @@ class TestNGM(unittest.TestCase):
 
         self.skin = cv2.cvtColor(
             cv2.cvtColor(
-                self.skin[..., :3],
+                self.skin,
                 cv2.COLOR_BGR2GRAY),
             cv2.COLOR_GRAY2BGR
         )
         result_py = apply_texture(self.base, self.skin, self.texture, self.im_alpha)
         # Skin is BGR at this point
-        self.skin = np.dstack([self.skin, self.im_alpha])
         result_scalar = normal_grain_merge(self.base, self.texture, self.skin, self.im_alpha, KernelKind.KERNEL_SCALAR.value)
         result_sse = normal_grain_merge(self.base, self.texture, self.skin, self.im_alpha, KernelKind.KERNEL_SSE42.value)
         result_avx = normal_grain_merge(self.base, self.texture, self.skin, self.im_alpha, KernelKind.KERNEL_AVX2.value)
@@ -143,12 +140,11 @@ class TestNGM(unittest.TestCase):
         result_py = apply_texture(self.base, self.skin, self.texture, self.im_alpha)
         self.skin = cv2.cvtColor(
             cv2.cvtColor(
-                self.skin[..., :3],
+                self.skin,
                 cv2.COLOR_BGR2GRAY),
             cv2.COLOR_GRAY2BGR
         )
         # Skin is BGR at this point
-        self.skin = np.dstack([self.skin, self.im_alpha])
         result_scalar = normal_grain_merge(self.base, self.texture, self.skin, self.im_alpha, KernelKind.KERNEL_SCALAR.value)
         result_sse = normal_grain_merge(self.base, self.texture, self.skin, self.im_alpha, KernelKind.KERNEL_SSE42.value)
         result_avx = normal_grain_merge(self.base, self.texture, self.skin, self.im_alpha, KernelKind.KERNEL_AVX2.value)

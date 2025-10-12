@@ -9,3 +9,5 @@ normal_grain_merge.egg-info/
 __pycache__*
 expected_result.png
 result.png
+*.so
+venv/

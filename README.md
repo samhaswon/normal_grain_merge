@@ -70,21 +70,22 @@ One of `KernelKind`.
 The entire reason for me writing this was NumPy being slow when this operation is in the hot path.
 So, I decided to write a SIMD version that does the type casting outside NumPy with only the intermediate values being in FP32.
 
-How much of a speedup is this? All numbers are from a Ryzen 7 4800H running Windows 11 and Python 3.12.4.
+How much of a speedup is this? All numbers are from a Ryzen 7 4800H running Ubuntu 24.04 and Python 3.12.3.
 
 | Method/Kernel     | Average Iteration Time |
 |-------------------|------------------------|
-| C scalar kernel   | 0.019565s              |
-| C SSE4.2 kernel   | 0.013705s              |
-| C AVX2 kernel     | 0.016842s              |
-| NumPy version     | 0.228098s              |
-| Old NumPy version | 0.350554s              |
+| C scalar kernel   | 0.016007s              |
+| C SSE4.2 kernel   | 0.011155s              |
+| C AVX2 kernel     | 0.014575s              |
+| NumPy version     | 0.190392s              |
+| Old NumPy version | 0.274065s              |
 
 | Method Comparison  | Speedup  |
 |--------------------|----------|
-| NumPy -> scalar    | 91.4227% |
-| NumPy -> SSE4.2    | 93.9915% |
-| NumPy -> AVX2      | 92.6165% |
-| Old np -> SSE4.2   | 96.0904% |
-| C scalar -> SSE4.2 | 29.9487% |
-| C scalar -> AVX2   | 13.9183% |
+| NumPy -> scalar    | 91.5927% |
+| NumPy -> SSE4.2    | 94.1409% |
+| NumPy -> AVX2      | 92.3448% |
+| Old np -> SSE4.2   | 95.9297% |
+| Old np -> AVX2     | 94.6819% |
+| C scalar -> SSE4.2 | 30.3086% |
+| C scalar -> AVX2   | 8.9448%  |
