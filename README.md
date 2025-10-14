@@ -74,18 +74,18 @@ How much of a speedup is this? All numbers are from a Ryzen 7 4800H running Ubun
 
 | Method/Kernel     | Average Iteration Time |
 |-------------------|------------------------|
-| C scalar kernel   | 0.016007s              |
-| C SSE4.2 kernel   | 0.011155s              |
-| C AVX2 kernel     | 0.014575s              |
-| NumPy version     | 0.190392s              |
-| Old NumPy version | 0.274065s              |
+| C scalar kernel   | 0.015599s              |
+| C SSE4.2 kernel   | 0.007122s              |
+| C AVX2 kernel     | 0.011721s              |
+| NumPy version     | 0.150046s              |
+| Old NumPy version | 0.235400s              |
 
 | Method Comparison  | Speedup  |
 |--------------------|----------|
-| NumPy -> scalar    | 91.5927% |
-| NumPy -> SSE4.2    | 94.1409% |
-| NumPy -> AVX2      | 92.3448% |
-| Old np -> SSE4.2   | 95.9297% |
-| Old np -> AVX2     | 94.6819% |
-| C scalar -> SSE4.2 | 30.3086% |
-| C scalar -> AVX2   | 8.9448%  |
+| NumPy -> scalar    | 89.6042% |
+| NumPy -> SSE4.2    | 95.2537% |
+| NumPy -> AVX2      | 92.1881% |
+| Old np -> SSE4.2   | 96.9747% |
+| Old np -> AVX2     | 95.0206% |
+| C scalar -> SSE4.2 | 54.3442% |
+| C scalar -> AVX2   | 24.8552% |

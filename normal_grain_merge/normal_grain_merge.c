@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <math.h>
 #include <float.h>
+#include <stdint.h>
+#include <string.h>
 #include <Python.h>
 #include <numpy/arrayobject.h>
 #include <smmintrin.h>
@@ -387,25 +389,54 @@ static inline __m256 nan_to_num_ps(__m256 x) {
     return _mm256_blendv_ps(_mm256_set1_ps(0.0f), x, cmp);
 }
 
-/* Truncate [0,1] floats to uint8 and scatter to interleaved RGB output. */
-static inline void store_unit_f32_to_u8_rgb8_avx2(__m256 fr, __m256 fg, __m256 fb,
-                                                  uint8_t *out_ptr, npy_intp start_idx) {
-    __m256 scale = _mm256_set1_ps(255.0f);
-    __m256i ir = _mm256_cvttps_epi32(_mm256_mul_ps(fr, scale));
-    __m256i ig = _mm256_cvttps_epi32(_mm256_mul_ps(fg, scale));
-    __m256i ib = _mm256_cvttps_epi32(_mm256_mul_ps(fb, scale));
+/* Convert 4 float32 RGB vectors in [0,1] to uint8_t RGBRGBRGBRGB without branches. */
+static inline void store_unit_f32_to_u8_rgb4(__m128 fr, __m128 fg, __m128 fb,
+                                             uint8_t *out_ptr) {
+    const __m128 scale = _mm_set1_ps(255.0f);
+    const __m128i zero = _mm_setzero_si128();
+    const __m128i max255 = _mm_set1_epi32(255);
 
-    int r[8], g[8], b[8];
-    _mm256_storeu_si256((__m256i*)r, ir);
-    _mm256_storeu_si256((__m256i*)g, ig);
-    _mm256_storeu_si256((__m256i*)b, ib);
+    __m128i ir = _mm_cvttps_epi32(_mm_mul_ps(fr, scale));
+    __m128i ig = _mm_cvttps_epi32(_mm_mul_ps(fg, scale));
+    __m128i ib = _mm_cvttps_epi32(_mm_mul_ps(fb, scale));
 
-    for (int k = 0; k < 8; ++k) {
-        const npy_intp p = start_idx + k;
-        out_ptr[3*p+0] = (uint8_t)(r[k] < 0 ? 0 : r[k] > 255 ? 255 : r[k]);
-        out_ptr[3*p+1] = (uint8_t)(g[k] < 0 ? 0 : g[k] > 255 ? 255 : g[k]);
-        out_ptr[3*p+2] = (uint8_t)(b[k] < 0 ? 0 : b[k] > 255 ? 255 : b[k]);
-    }
+    ir = _mm_min_epi32(_mm_max_epi32(ir, zero), max255);
+    ig = _mm_min_epi32(_mm_max_epi32(ig, zero), max255);
+    ib = _mm_min_epi32(_mm_max_epi32(ib, zero), max255);
+
+    __m128i ir16 = _mm_packus_epi32(ir, zero);
+    __m128i ig16 = _mm_packus_epi32(ig, zero);
+    __m128i ib16 = _mm_packus_epi32(ib, zero);
+
+    __m128i ir8 = _mm_packus_epi16(ir16, zero);
+    __m128i ig8 = _mm_packus_epi16(ig16, zero);
+    __m128i ib8 = _mm_packus_epi16(ib16, zero);
+
+    const __m128i mask_r = _mm_setr_epi8(
+        0, (char)0x80, (char)0x80, 1,
+        (char)0x80, (char)0x80, 2, (char)0x80,
+        (char)0x80, 3, (char)0x80, (char)0x80,
+        (char)0x80, (char)0x80, (char)0x80, (char)0x80);
+    const __m128i mask_g = _mm_setr_epi8(
+        (char)0x80, 0, (char)0x80, (char)0x80,
+        1, (char)0x80, (char)0x80, 2,
+        (char)0x80, (char)0x80, 3, (char)0x80,
+        (char)0x80, (char)0x80, (char)0x80, (char)0x80);
+    const __m128i mask_b = _mm_setr_epi8(
+        (char)0x80, (char)0x80, 0, (char)0x80,
+        (char)0x80, 1, (char)0x80, (char)0x80,
+        2, (char)0x80, (char)0x80, 3,
+        (char)0x80, (char)0x80, (char)0x80, (char)0x80);
+
+    __m128i packed = _mm_or_si128(
+        _mm_or_si128(_mm_shuffle_epi8(ir8, mask_r),
+                     _mm_shuffle_epi8(ig8, mask_g)),
+        _mm_shuffle_epi8(ib8, mask_b));
+
+    _mm_storel_epi64((__m128i*)out_ptr, packed);
+    __m128i tail_vec = _mm_srli_si128(packed, 8);
+    uint32_t tail = (uint32_t)_mm_cvtsi128_si32(tail_vec);
+    memcpy(out_ptr + 8, &tail, sizeof(tail));
 }
 
 /* texture is RGB: texture_alpha = im_alpha broadcast, inverse_tpa = 1 - texture_alpha */
@@ -470,7 +501,14 @@ static void kernel_avx2_rgb(const uint8_t *base, const uint8_t *texture,
         __m256 fg = mul_add_ps256(gm_g, fa_im, _mm256_mul_ps(fb_g, fit_a));
         __m256 fb = mul_add_ps256(gm_b, fa_im, _mm256_mul_ps(fb_b, fit_a));
 
-        store_unit_f32_to_u8_rgb8_avx2(fr, fg, fb, out, i);
+        store_unit_f32_to_u8_rgb4(_mm256_castps256_ps128(fr),
+                                  _mm256_castps256_ps128(fg),
+                                  _mm256_castps256_ps128(fb),
+                                  out + 3*i);
+        store_unit_f32_to_u8_rgb4(_mm256_extractf128_ps(fr, 1),
+                                  _mm256_extractf128_ps(fg, 1),
+                                  _mm256_extractf128_ps(fb, 1),
+                                  out + 3*(i + 4));
     }
 
     if (i < pixels) {
@@ -535,7 +573,14 @@ static void kernel_avx2_rgba(const uint8_t *base, const uint8_t *texture,
         __m256 fg = mul_add_ps256(gm_g, fta, _mm256_mul_ps(fb_g, fit_a));
         __m256 fb = mul_add_ps256(gm_b, fta, _mm256_mul_ps(fb_b, fit_a));
 
-        store_unit_f32_to_u8_rgb8_avx2(fr, fg, fb, out, i);
+        store_unit_f32_to_u8_rgb4(_mm256_castps256_ps128(fr),
+                                  _mm256_castps256_ps128(fg),
+                                  _mm256_castps256_ps128(fb),
+                                  out + 3*i);
+        store_unit_f32_to_u8_rgb4(_mm256_extractf128_ps(fr, 1),
+                                  _mm256_extractf128_ps(fg, 1),
+                                  _mm256_extractf128_ps(fb, 1),
+                                  out + 3*(i + 4));
     }
 
     if (i < pixels) {
@@ -631,19 +676,7 @@ static void kernel_sse42_rgb(const uint8_t *base, const uint8_t *texture,
         __m128 fg = mul_add_ps128(gm_g, fa_im, _mm_mul_ps(fb_g, fit_a));
         __m128 fb = mul_add_ps128(gm_b, fa_im, _mm_mul_ps(fb_b, fit_a));
 
-        float rr[4], gg[4], bb[4];
-        _mm_storeu_ps(rr, fr);
-        _mm_storeu_ps(gg, fg);
-        _mm_storeu_ps(bb, fb);
-
-        for (int k = 0; k < 4; ++k) {
-            int r = (int)(rr[k] * 255.0f);
-            int g = (int)(gg[k] * 255.0f);
-            int b = (int)(bb[k] * 255.0f);
-            out[3*(i+k)+0] = (uint8_t)(r < 0 ? 0 : r > 255 ? 255 : r);
-            out[3*(i+k)+1] = (uint8_t)(g < 0 ? 0 : g > 255 ? 255 : g);
-            out[3*(i+k)+2] = (uint8_t)(b < 0 ? 0 : b > 255 ? 255 : b);
-        }
+        store_unit_f32_to_u8_rgb4(fr, fg, fb, out + 3*i);
     }
 
     if (i < pixels) {
@@ -709,19 +742,7 @@ static void kernel_sse42_rgba(const uint8_t *base, const uint8_t *texture,
         __m128 fg = mul_add_ps128(gm_g, fta, _mm_mul_ps(fb_g, fit_a));
         __m128 fb = mul_add_ps128(gm_b, fta, _mm_mul_ps(fb_b, fit_a));
 
-        float rr[4], gg[4], bb[4];
-        _mm_storeu_ps(rr, fr);
-        _mm_storeu_ps(gg, fg);
-        _mm_storeu_ps(bb, fb);
-
-        for (int k = 0; k < 4; ++k) {
-            int r = (int)(rr[k] * 255.0f);
-            int g = (int)(gg[k] * 255.0f);
-            int b = (int)(bb[k] * 255.0f);
-            out[3*(i+k)+0] = (uint8_t)(r < 0 ? 0 : r > 255 ? 255 : r);
-            out[3*(i+k)+1] = (uint8_t)(g < 0 ? 0 : g > 255 ? 255 : g);
-            out[3*(i+k)+2] = (uint8_t)(b < 0 ? 0 : b > 255 ? 255 : b);
-        }
+        store_unit_f32_to_u8_rgb4(fr, fg, fb, out + 3*i);
     }
 
     if (i < pixels) {
