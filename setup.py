@@ -23,7 +23,7 @@ module = Extension(
 
 setup(
     name="normal_grain_merge",
-    version="0.1.0",
+    version="0.1.1",
     description="Normal grain merge C extension",
     ext_modules=[module],
     packages=["normal_grain_merge"],
