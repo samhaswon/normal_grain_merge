@@ -341,19 +341,25 @@ static void kernel_scalar_rgba(const uint8_t *base, const uint8_t *texture,
 }
 
 /* ---------- AVX2 helpers ----------
-   Interleaved RGB(A) is awkward for SIMD. For a skeleton that still uses AVX2, we use gathers
-   over a stride (3 or 4) to pull 8 pixels for a given channel into a vector.
-   You can later replace gathers with better deinterleaving if needed.
+   Interleaved RGB(A) is awkward for SIMD. We build 8-lane vectors per channel by
+   reusing the scalar u8x4 -> f32 helpers instead of relying on gathers.
 */
 
-/* Convert 8 u8 interleaved samples addressed by idx to float32 in [0,1]. */
-static inline __m256 gather_u8_block_to_unit_f32_avx2(const uint8_t *block_ptr,
-                                                      __m256i idx,
-                                                      __m256i mask_ff,
-                                                      __m256 inv255) {
-    __m256i v32 = _mm256_i32gather_epi32((const int*)block_ptr, idx, 1);
-    v32 = _mm256_and_si256(v32, mask_ff);
-    return _mm256_mul_ps(_mm256_cvtepi32_ps(v32), inv255);
+/* Forward declaration; definition shared with the SSE helpers later in the file. */
+static inline __m128 u8x4_to_unit_f32(uint8_t a, uint8_t b, uint8_t c, uint8_t d);
+
+/* Build 8-lane [0,1] floats for one channel from interleaved RGB. No gathers. */
+static inline __m256 load8_rgb_channel_to_unit_f32(const uint8_t *p, int ch /*0,1,2*/) {
+    /* pixel i, channel ch is at p[3*i + ch] */
+    __m128 lo = u8x4_to_unit_f32(p[3*0 + ch], p[3*1 + ch], p[3*2 + ch], p[3*3 + ch]);
+    __m128 hi = u8x4_to_unit_f32(p[3*4 + ch], p[3*5 + ch], p[3*6 + ch], p[3*7 + ch]);
+    return _mm256_set_m128(hi, lo);
+}
+
+static inline __m256 load8_rgba_channel_to_unit_f32(const uint8_t *p, int ch /*0..3*/) {
+    __m128 lo = u8x4_to_unit_f32(p[4*0 + ch], p[4*1 + ch], p[4*2 + ch], p[4*3 + ch]);
+    __m128 hi = u8x4_to_unit_f32(p[4*4 + ch], p[4*5 + ch], p[4*6 + ch], p[4*7 + ch]);
+    return _mm256_set_m128(hi, lo);
 }
 
 static inline __m256 mul_add_ps256(__m256 a, __m256 b, __m256 c) {
@@ -444,8 +450,6 @@ static void kernel_avx2_rgb(const uint8_t *base, const uint8_t *texture,
                             const uint8_t *skin, const uint8_t *im_alpha,
                             uint8_t *out, npy_intp pixels) {
     const __m256 inv255 = _mm256_set1_ps(1.0f/255.0f);
-    const __m256i mask_ff = _mm256_set1_epi32(0xFF);
-    const __m256i idx_rgb = _mm256_setr_epi32(0, 3, 6, 9, 12, 15, 18, 21);
     const __m256 half = _mm256_set1_ps(0.5f);
     const __m256 one  = _mm256_set1_ps(1.0f);
     const __m256 w    = _mm256_set1_ps((float)SKIN_WEIGHT);
@@ -458,19 +462,19 @@ static void kernel_avx2_rgb(const uint8_t *base, const uint8_t *texture,
         const uint8_t *skin_blk = skin + 3*i;
 
         /* base RGB in [0,1] */
-        __m256 fb_r = gather_u8_block_to_unit_f32_avx2(base_blk + 0, idx_rgb, mask_ff, inv255);
-        __m256 fb_g = gather_u8_block_to_unit_f32_avx2(base_blk + 1, idx_rgb, mask_ff, inv255);
-        __m256 fb_b = gather_u8_block_to_unit_f32_avx2(base_blk + 2, idx_rgb, mask_ff, inv255);
+        __m256 fb_r = load8_rgb_channel_to_unit_f32(base_blk, 0);
+        __m256 fb_g = load8_rgb_channel_to_unit_f32(base_blk, 1);
+        __m256 fb_b = load8_rgb_channel_to_unit_f32(base_blk, 2);
 
         /* texture RGB in [0,1] */
-        __m256 ft_r = gather_u8_block_to_unit_f32_avx2(tex_blk + 0, idx_rgb, mask_ff, inv255);
-        __m256 ft_g = gather_u8_block_to_unit_f32_avx2(tex_blk + 1, idx_rgb, mask_ff, inv255);
-        __m256 ft_b = gather_u8_block_to_unit_f32_avx2(tex_blk + 2, idx_rgb, mask_ff, inv255);
+        __m256 ft_r = load8_rgb_channel_to_unit_f32(tex_blk, 0);
+        __m256 ft_g = load8_rgb_channel_to_unit_f32(tex_blk, 1);
+        __m256 ft_b = load8_rgb_channel_to_unit_f32(tex_blk, 2);
 
         /* skin RGB in [0,1] */
-        __m256 fs_r = gather_u8_block_to_unit_f32_avx2(skin_blk + 0, idx_rgb, mask_ff, inv255);
-        __m256 fs_g = gather_u8_block_to_unit_f32_avx2(skin_blk + 1, idx_rgb, mask_ff, inv255);
-        __m256 fs_b = gather_u8_block_to_unit_f32_avx2(skin_blk + 2, idx_rgb, mask_ff, inv255);
+        __m256 fs_r = load8_rgb_channel_to_unit_f32(skin_blk, 0);
+        __m256 fs_g = load8_rgb_channel_to_unit_f32(skin_blk, 1);
+        __m256 fs_b = load8_rgb_channel_to_unit_f32(skin_blk, 2);
 
         /* texture_alpha = im_alpha */
         __m256 fa_im = load8_u8_to_unit_f32_avx2(im_alpha + i, inv255);
@@ -522,9 +526,6 @@ static void kernel_avx2_rgba(const uint8_t *base, const uint8_t *texture,
                              const uint8_t *skin, const uint8_t *im_alpha,
                              uint8_t *out, npy_intp pixels) {
     const __m256 inv255 = _mm256_set1_ps(1.0f/255.0f);
-    const __m256i mask_ff = _mm256_set1_epi32(0xFF);
-    const __m256i idx_rgb  = _mm256_setr_epi32(0, 3, 6, 9, 12, 15, 18, 21);
-    const __m256i idx_rgba = _mm256_setr_epi32(0, 4, 8, 12, 16, 20, 24, 28);
     const __m256 half = _mm256_set1_ps(0.5f);
     const __m256 one  = _mm256_set1_ps(1.0f);
     const __m256 w    = _mm256_set1_ps((float)SKIN_WEIGHT);
@@ -536,18 +537,18 @@ static void kernel_avx2_rgba(const uint8_t *base, const uint8_t *texture,
         const uint8_t *tex_blk  = texture + 4*i;
         const uint8_t *skin_blk = skin + 3*i;
 
-        __m256 fb_r = gather_u8_block_to_unit_f32_avx2(base_blk + 0, idx_rgb, mask_ff, inv255);
-        __m256 fb_g = gather_u8_block_to_unit_f32_avx2(base_blk + 1, idx_rgb, mask_ff, inv255);
-        __m256 fb_b = gather_u8_block_to_unit_f32_avx2(base_blk + 2, idx_rgb, mask_ff, inv255);
+        __m256 fb_r = load8_rgb_channel_to_unit_f32(base_blk, 0);
+        __m256 fb_g = load8_rgb_channel_to_unit_f32(base_blk, 1);
+        __m256 fb_b = load8_rgb_channel_to_unit_f32(base_blk, 2);
 
-        __m256 ft_r = gather_u8_block_to_unit_f32_avx2(tex_blk + 0, idx_rgba, mask_ff, inv255);
-        __m256 ft_g = gather_u8_block_to_unit_f32_avx2(tex_blk + 1, idx_rgba, mask_ff, inv255);
-        __m256 ft_b = gather_u8_block_to_unit_f32_avx2(tex_blk + 2, idx_rgba, mask_ff, inv255);
-        __m256 ft_a = gather_u8_block_to_unit_f32_avx2(tex_blk + 3, idx_rgba, mask_ff, inv255);  /* texture alpha */
+        __m256 ft_r = load8_rgba_channel_to_unit_f32(tex_blk, 0);
+        __m256 ft_g = load8_rgba_channel_to_unit_f32(tex_blk, 1);
+        __m256 ft_b = load8_rgba_channel_to_unit_f32(tex_blk, 2);
+        __m256 ft_a = load8_rgba_channel_to_unit_f32(tex_blk, 3);  /* texture alpha */
 
-        __m256 fs_r = gather_u8_block_to_unit_f32_avx2(skin_blk + 0, idx_rgb, mask_ff, inv255);
-        __m256 fs_g = gather_u8_block_to_unit_f32_avx2(skin_blk + 1, idx_rgb, mask_ff, inv255);
-        __m256 fs_b = gather_u8_block_to_unit_f32_avx2(skin_blk + 2, idx_rgb, mask_ff, inv255);
+        __m256 fs_r = load8_rgb_channel_to_unit_f32(skin_blk, 0);
+        __m256 fs_g = load8_rgb_channel_to_unit_f32(skin_blk, 1);
+        __m256 fs_b = load8_rgb_channel_to_unit_f32(skin_blk, 2);
 
         __m256 fa_im = load8_u8_to_unit_f32_avx2(im_alpha + i, inv255);
         __m256 fta   = _mm256_mul_ps(ft_a, fa_im);           /* texture_alpha */
