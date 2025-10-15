@@ -12,7 +12,7 @@ if sys.platform == "win32":
 elif "arm" in arch or "aarch64" in arch:
     extra_compile_args += ["-O3"]
 else:
-    extra_compile_args += ["-O3", "-march=x86-64", "-mavx2", "-msse4.2", "-flto", "-mfma",]
+    extra_compile_args += ["-O3", "-march=x86-64", "-mavx2", "-msse4.2", "-flto", "-mfma", "-ffp-contract=fast",]
 
 module = Extension(
     "normal_grain_merge.normal_grain_merge",

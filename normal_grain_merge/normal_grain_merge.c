@@ -445,6 +445,19 @@ static inline void store_unit_f32_to_u8_rgb4(__m128 fr, __m128 fg, __m128 fb,
     memcpy(out_ptr + 8, &tail, sizeof(tail));
 }
 
+/* Pack 8 lanes of fr/fg/fb in [0,1] to 24 bytes RGBRGB... and store. */
+static inline void store8_unit_f32_to_u8_rgb(__m256 fr, __m256 fg, __m256 fb, uint8_t *out) {
+    __m128 fr_lo = _mm256_castps256_ps128(fr);
+    __m128 fg_lo = _mm256_castps256_ps128(fg);
+    __m128 fb_lo = _mm256_castps256_ps128(fb);
+    store_unit_f32_to_u8_rgb4(fr_lo, fg_lo, fb_lo, out);
+
+    __m128 fr_hi = _mm256_extractf128_ps(fr, 1);
+    __m128 fg_hi = _mm256_extractf128_ps(fg, 1);
+    __m128 fb_hi = _mm256_extractf128_ps(fb, 1);
+    store_unit_f32_to_u8_rgb4(fr_hi, fg_hi, fb_hi, out + 12);
+}
+
 /* texture is RGB: texture_alpha = im_alpha broadcast, inverse_tpa = 1 - texture_alpha */
 static void kernel_avx2_rgb(const uint8_t *base, const uint8_t *texture,
                             const uint8_t *skin, const uint8_t *im_alpha,
@@ -505,14 +518,7 @@ static void kernel_avx2_rgb(const uint8_t *base, const uint8_t *texture,
         __m256 fg = mul_add_ps256(gm_g, fa_im, _mm256_mul_ps(fb_g, fit_a));
         __m256 fb = mul_add_ps256(gm_b, fa_im, _mm256_mul_ps(fb_b, fit_a));
 
-        store_unit_f32_to_u8_rgb4(_mm256_castps256_ps128(fr),
-                                  _mm256_castps256_ps128(fg),
-                                  _mm256_castps256_ps128(fb),
-                                  out + 3*i);
-        store_unit_f32_to_u8_rgb4(_mm256_extractf128_ps(fr, 1),
-                                  _mm256_extractf128_ps(fg, 1),
-                                  _mm256_extractf128_ps(fb, 1),
-                                  out + 3*(i + 4));
+        store8_unit_f32_to_u8_rgb(fr, fg, fb, out + 3*i);
     }
 
     if (i < pixels) {
@@ -574,14 +580,7 @@ static void kernel_avx2_rgba(const uint8_t *base, const uint8_t *texture,
         __m256 fg = mul_add_ps256(gm_g, fta, _mm256_mul_ps(fb_g, fit_a));
         __m256 fb = mul_add_ps256(gm_b, fta, _mm256_mul_ps(fb_b, fit_a));
 
-        store_unit_f32_to_u8_rgb4(_mm256_castps256_ps128(fr),
-                                  _mm256_castps256_ps128(fg),
-                                  _mm256_castps256_ps128(fb),
-                                  out + 3*i);
-        store_unit_f32_to_u8_rgb4(_mm256_extractf128_ps(fr, 1),
-                                  _mm256_extractf128_ps(fg, 1),
-                                  _mm256_extractf128_ps(fb, 1),
-                                  out + 3*(i + 4));
+        store8_unit_f32_to_u8_rgb(fr, fg, fb, out + 3*i);
     }
 
     if (i < pixels) {
